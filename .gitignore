@@ -1,0 +1,9 @@
+chatgpt_profile/
+__pycache__/
+*.pyc
+debug/
+*.egg-info/
+generated/
+.DS_Store
+test_outputs/
+test_prompts/

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-tool-use"
+version = "0.1.0"
+description = "MCP tool for Claude Code that routes queries through ChatGPT via browser automation"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp",
+    "playwright",
+    "markdownify",
+    "json-repair",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+py-modules = ["mcp_server", "browser", "gpt_search", "login"]
+
+[project.scripts]
+gpt-tools = "mcp_server:main"
+gpt-tools-login = "login:main"

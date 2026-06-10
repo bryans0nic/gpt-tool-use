@@ -1,0 +1,4 @@
+mcp
+playwright
+markdownify
+json-repair
