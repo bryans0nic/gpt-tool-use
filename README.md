@@ -36,6 +36,8 @@ pip install .
 playwright install chromium
 ```
 
+If you plan to run the launchd service, keep the clone outside `~/Desktop`, `~/Documents`, and `~/Downloads` — see the TCC warning under "One-time setup".
+
 Run once to log into ChatGPT (opens a browser window — sign in, then close the window):
 
 ```bash
@@ -71,6 +73,8 @@ If you have multiple Codex or Claude Code sessions open and want them all to use
 - `ProgramArguments[0]` — `/PATH/TO/python3` → your `python3` absolute path (find with `which python3`). If you upgrade Python later, update this path and reload the plist (`launchctl unload` + `launchctl load`); otherwise the service silently fails to start at next login (visible only as a non-zero exit code in `launchctl list | grep gpt-tools`).
 - `ProgramArguments[1]` — `/PATH/TO/gpt_tool_use/mcp_server.py` → full path to `mcp_server.py`
 - `WorkingDirectory`, `StandardOutPath`, `StandardErrorPath` — replace `/PATH/TO/gpt_tool_use` with the absolute path to this repo
+
+**TCC warning:** the repo must live *outside* `~/Desktop`, `~/Documents`, and `~/Downloads`. macOS blocks launchd background jobs from those folders, so the service dies at spawn with exit code 78 (`EX_CONFIG`) and empty logs — Python never starts. If `launchctl list | grep gpt-tools` shows 78, it's this or a stale Python path.
 
 **2. Install the plist.** Use whatever you set for `Label` as the filename:
 

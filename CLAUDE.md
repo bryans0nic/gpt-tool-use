@@ -29,10 +29,13 @@ MCP server that drives ChatGPT via Playwright browser automation. Exposes `gpt_s
 - **Tests.** `tests/test_mcp_server.py` covers the JSON-normalization helpers (`_clean_json_result` and friends). Run `python3 -m pytest tests/ -q`. The browser flows have no automated coverage — verify those manually.
 - **Browser lifecycle.** First call launches Chromium and pays the startup cost. Subsequent calls reuse the same browser. If the user closes the browser window manually, `is_alive` flips false and the next call re-launches.
 - Browser launches headed (`headless=False`) by default so ChatGPT login can be completed on first run. Pass `--headless` to `mcp_server.py` to run headless. **Don't use `--headless` for the launchd service** — Cloudflare's bot detection on chatgpt.com flags headless Chromium and serves a "Verify you are human" interstitial, which means `#prompt-textarea` never renders and every tool call fails with `Failed to find chat input on new session`. Symptom shows up in `debug/debug_session_init.png`. Run the launchd service headed even though it parks a Chromium window on the desktop.
+- **Install location: never under `~/Desktop`, `~/Documents`, or `~/Downloads`.** macOS TCC blocks launchd background jobs from those folders — launchd can't chdir/open logs there, so the service dies at spawn with `EX_CONFIG` (78) and *empty logs* (Python never starts). Bit for real on 2026-07-07 after an OS update reset TCC grants; the repo moved from `~/Desktop` to `~/Customization/gpt_tool_use` as the fix. `launchctl print gui/$UID/com.kchafloque.gpt-tools | grep 'last exit'` is the tell.
 - **Transport modes.** `mcp_server.py` accepts `--transport stdio` (default, one server per Claude Code session) or `--transport http` (long-lived server, multiple Claude Code sessions share it as clients). HTTP mode is the only way to run image gen concurrently across multiple Claude Code sessions, because the persistent Chromium profile only allows one accessing process at a time. With stdio, two sessions = two server processes = profile lock conflict. With HTTP, one server process owns the profile; all sessions go through it. Defaults: host `127.0.0.1`, port `8788`, path `/mcp` (FastMCP's `streamable_http_path`). See `launchd.plist.template` for auto-start.
 - **Settings via `mcp.settings`.** FastMCP host/port aren't `run()` args; they're set on `mcp.settings` before calling `run(transport="streamable-http")`.
 
 ## Setup on a new machine
+
+Clone somewhere launchd can reach — **not** Desktop/Documents/Downloads (TCC; see Key details).
 
 ```
 git clone <repo>

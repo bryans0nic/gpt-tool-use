@@ -17,6 +17,8 @@
         <string>8788</string>
     </array>
 
+    <!-- Do NOT install under ~/Desktop, ~/Documents, or ~/Downloads: macOS TCC blocks launchd
+         from those folders and the job dies at spawn with EX_CONFIG (78), logs empty. -->
     <key>WorkingDirectory</key>
     <string>/PATH/TO/gpt_tool_use</string>
 
