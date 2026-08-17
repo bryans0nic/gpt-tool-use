@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "MCP tool for Claude Code that routes queries through ChatGPT via browser automation"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp",
+    # ponytail: pinned below 2.0 — that release renamed FastMCP to MCPServer
+    # and mcp_server.py isn't written against the new API yet.
+    "mcp<2.0.0",
     "playwright",
     "markdownify",
     "json-repair",

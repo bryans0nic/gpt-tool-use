@@ -67,67 +67,91 @@ for the local session (you) to do.
 Work top to bottom. Commit as you go; push to `main` of this fork
 (`origin` = `https://github.com/bryans0nic/gpt-tool-use`).
 
-### 1. Install & smoke-test locally (needs the real PC + browser)
-- [ ] `pip install .` (or `pip install -e .`) in a venv, then
-      `playwright install chromium`.
-- [ ] Set `GPT_TOOLS_HOME` to a writable dir, e.g.
-      `setx GPT_TOOLS_HOME %USERPROFILE%\.gpt-tools` (new shell after `setx`).
-- [ ] `gpt-tools-login` → sign into ChatGPT in the window that opens, then close
-      it. Confirm `%GPT_TOOLS_HOME%\chatgpt_profile\` was created and persists.
-- [ ] Run the server once (`gpt-tools`) to confirm it starts under stdio without
-      import/entry-point errors.
+### 1. Install & smoke-test locally (needs the real PC + browser) — DONE
+- [x] venv created at `.venv`, `pip install -e .`, `playwright install chromium`.
+- [x] `GPT_TOOLS_HOME` set via `setx` to `%USERPROFILE%\.gpt-tools`.
+- [x] Server starts under stdio without import errors (after the `mcp<2.0.0`
+      pin below).
+- [x] `gpt-tools-login` / isolated-profile login — **superseded**, see below.
 
-### 2. Selector sanity-check against the *current* ChatGPT site
-- [ ] With the logged-in profile, run one `gpt_search` end-to-end and confirm a
-      clean markdown result comes back.
-- [ ] If it hangs or returns empty, the DOM selectors in `browser.py` have
-      drifted. Check, in order: the prompt input selectors (`PROMPT_SELECTORS`),
-      the `data-message-author-role="assistant"` container, and the
-      `stop-button` completion signal. Patch the ones that moved; keep the
-      fallback-list pattern rather than hard-coding a single selector.
-- [ ] Note model selection: confirm the ChatGPT account's default model is the
-      "thinking" one you want the offload to use (this fork doesn't switch models
-      in the search path — the web UI's current default is what answers).
+### 2. Auth: isolated profile didn't fit this deployment — pivoted to CDP
+The isolated persistent-profile plan (decided in the "Decisions already made"
+section above) hit a real-world wall: this ChatGPT deployment is behind HHS
+SSO (`https://go.hhs.gov/chatgpt`, PIV-card auth), and the isolated profile
+has no path to complete that login noninteractively or attended-once in a way
+that stuck cleanly the first few tries.
 
-### 3. Windows-tailor the docs (safe to do without the live site)
-- [ ] The upstream `README.md` "Running as a long-lived service" section is
-      **macOS-only** (`launchd.plist.template`, TCC warnings). Add a **Windows
-      Setup** section (or a `docs/WINDOWS.md`) covering: venv + `pip install`,
+Landed instead on **CDP attach to a dedicated Chrome profile** (not the
+literal isolated `chatgpt_profile/` dir, not the user's live daily-driver
+Chrome either — a middle path):
+- `browser.py` now supports `GPT_TOOLS_CDP_URL` — when set, `ChatGPTBrowser`
+  connects via `playwright.chromium.connect_over_cdp()` instead of
+  `launch_persistent_context()`, and never closes the attached context/browser
+  (only disconnects).
+- Chrome **refuses** `--remote-debugging-port` on the literal default profile
+  directory (a real, current security restriction — confirmed by testing, not
+  assumed). So the working setup is: `robocopy` the default profile (minus
+  caches) into `%GPT_TOOLS_HOME%\chrome_cdp_profile`, launch Chrome with the
+  debug flag pointed at *that* copy, sign in once (PIV/MFA) in that window.
+  Session persists there afterward — one-time cost, not per-run.
+- Copied cookies alone were **not** sufficient to skip sign-in (Entra ID/PIV
+  sessions are device-bound, don't survive a file copy) — a real interactive
+  login in the debug-profile window was required regardless of the copy.
+- Explicitly declined and did not build: (a) attaching CDP to the user's
+  actual live default-profile Chrome (Chrome blocks this by design; a
+  symlink/junction workaround was requested and refused), (b) reading/
+  decrypting the live Chrome `Cookies` SQLite DB directly (equivalent to a
+  credential-theft technique), (c) loading raw session-token cookies the user
+  pasted into chat (live auth credentials — same category as a password).
+- Full working end-to-end smoke test confirmed 2026-08-17 (see below).
+
+### 3. Selector sanity-check against the *current* ChatGPT site — DONE
+- [x] `gpt_search.py "In one sentence, what is the capital of France?"` →
+      returned a clean one-line answer end-to-end via the CDP path. Selectors
+      in `browser.py` did **not** need patching — they still match current
+      ChatGPT DOM.
+- [x] Found and fixed a real gotcha instead: the SSO gateway URL
+      (`go.hhs.gov/chatgpt`) re-prompts **account selection** on every fresh
+      navigation, even with a valid session cookie already present — it works
+      once for interactive login but breaks unattended repeat tool calls.
+      Fixed by adding `CHAT_URL`/`SSO_LOGIN_URL` split in `browser.py`:
+      `login.py` still goes through the SSO gateway (needed to establish the
+      session), but `ChatGPTBrowser.new_session()` now defaults to navigating
+      straight to `https://chatgpt.com/?model=auto` (overridable via
+      `GPT_TOOLS_CHAT_URL`), which reuses the already-established session
+      cookie without re-triggering the picker.
+- [ ] Model selection not yet confirmed — this fork doesn't switch models in
+      the search path; whatever this account's default is answers.
+
+### 4. Dependency drift found and fixed — DONE
+- [x] The installed `mcp` package had moved to `2.0.0` (legitimate — verified
+      against the real PyPI record and GitHub org, not a supply-chain issue,
+      just newer than this repo's code expects) and renamed `FastMCP` to
+      `MCPServer` under `mcp.server.mcpserver`, breaking `mcp_server.py`'s
+      import (`mcp.server.fastmcp` no longer exists in 2.x). Pinned
+      `mcp<2.0.0` in `pyproject.toml` and `requirements.txt` rather than
+      rewriting `mcp_server.py` against the new API. `python -m pytest
+      tests/ -q` passes (15 tests) with the pin in place.
+
+### 5. Windows-tailor the docs — DONE
+- [x] Added a **Windows setup** section to `README.md` covering venv install,
       `playwright install chromium`, `GPT_TOOLS_HOME` via `setx`,
-      `gpt-tools-login`, and the Claude Code wiring below. Mark the launchd
-      section clearly as macOS-only rather than deleting it.
-- [ ] Add the **Claude Code CLI wiring** verbatim:
-      ```
-      claude mcp add gpt-tools -- gpt-tools
-      ```
-      or the `.mcp.json` / `~/.claude.json` block:
-      ```json
-      {
-        "mcpServers": {
-          "gpt-tools": {
-            "command": "gpt-tools",
-            "args": [],
-            "env": { "GPT_TOOLS_HOME": "C:\\Users\\<you>\\.gpt-tools" }
-          }
-        }
-      }
-      ```
-      (Use the full path to the `gpt-tools` script if it isn't on `PATH` — e.g.
-      the venv's `Scripts\gpt-tools.exe`.)
-- [ ] If the user wants **Claude Desktop** too (see open question), add the
-      equivalent `claude_desktop_config.json` block.
-- [ ] Add a one-line **orchestration note**: Claude Code decides *what* to
-      offload and calls `gpt_search`; ChatGPT does the searching/reasoning and
-      returns clean markdown. Keep the ToS/fragility caveat from upstream.
+      `gpt-tools-login`, and Claude Code MCP wiring.
+- [x] Added an **SSO auth (enterprise ChatGPT via CDP)** subsection covering
+      the profile-copy + debug-Chrome + `GPT_TOOLS_CDP_URL` flow, with an
+      explicit warning against pointing it at a live daily-driver Chrome.
+- [x] Marked the "Running as a long-lived service" section header as macOS-only
+      rather than deleting it.
+- [ ] Claude Desktop config block — not added; user only asked about Claude
+      Code CLI so far (open question below still stands if that changes).
 
-### 4. Optional: Windows autostart (only if the user asks)
+### 6. Optional: Windows autostart (only if the user asks)
 - [ ] Replace the launchd approach with either a **Task Scheduler** entry or
       **NSSM**-wrapped service — but for Claude Code's stdio transport this is
       usually unnecessary (Claude Code spawns `gpt-tools` itself). Don't build
-      this unless requested.
+      this unless requested. Not done — not requested.
 
-### 5. Finalize
-- [ ] Update `README.md` so Windows is a first-class path.
+### 7. Finalize
 - [ ] Commit + push to `main`.
 
 ---
@@ -145,8 +169,15 @@ Work top to bottom. Commit as you go; push to `main` of this fork
 - **Speed tradeoff is expected:** browser automation is slower than an API call.
   That's fine for the "kick off, come back to a result" workflow.
 
-## State at handoff
+## State at handoff (updated 2026-08-17, local session)
 
-- Fork created and cloned; upstream code unmodified except this `HANDOFF.md`.
-- No Windows docs written yet, no selector check run yet (both need the PC).
-- Nothing installed or configured on the target machine.
+- Installed, tested, and working end-to-end on this Windows PC via CDP attach
+  (see task 2 above) — `gpt_search.py` round-trips through the real HHS-SSO
+  ChatGPT deployment.
+- Code changes from the original fork: `browser.py` (`GPT_TOOLS_CDP_URL`,
+  `CHAT_URL`/`SSO_LOGIN_URL` split), `login.py` (uses `SSO_LOGIN_URL`),
+  `pyproject.toml`/`requirements.txt` (`mcp<2.0.0` pin). Not yet committed —
+  see task 7.
+- `README.md` has a Windows setup section including the CDP/SSO flow.
+- Still open: Claude Desktop config (not requested yet), Windows autostart
+  (not requested), commit + push.

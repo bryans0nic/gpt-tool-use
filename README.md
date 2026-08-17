@@ -61,7 +61,59 @@ Then add to your Claude Code MCP config (`~/.claude.json` under `mcpServers`, or
 
 This is the **stdio transport**: Claude Code spawns one MCP server subprocess per session. Simple, but if you run multiple Claude Code sessions at once, each spawns its own server, and they fight over the persistent ChatGPT profile lock — only one session can use image gen at a time. See "Running as a long-lived service" below for the multi-session setup.
 
-## Running as a long-lived service
+## Windows setup
+
+```powershell
+git clone https://github.com/bryans0nic/gpt-tool-use.git
+cd gpt-tool-use
+python -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\python -m playwright install chromium
+setx GPT_TOOLS_HOME "%USERPROFILE%\.gpt-tools"
+```
+
+Open a new shell (so `setx` takes effect), then log in:
+
+```powershell
+.venv\Scripts\gpt-tools-login
+```
+
+Claude Code MCP config (`~/.claude.json` or via `claude mcp add gpt-tools -- <path>\.venv\Scripts\gpt-tools.exe`):
+
+```json
+{
+  "mcpServers": {
+    "gpt-tools": {
+      "command": "C:\\path\\to\\gpt-tool-use\\.venv\\Scripts\\gpt-tools.exe",
+      "args": [],
+      "env": { "GPT_TOOLS_HOME": "C:\\Users\\<you>\\.gpt-tools" }
+    }
+  }
+}
+```
+
+### SSO auth (enterprise ChatGPT via CDP)
+
+If your org's ChatGPT is behind SSO and the isolated-profile login (`gpt-tools-login`) can't reach it, attach to a real, already-logged-in Chrome via CDP instead:
+
+1. Copy your Chrome profile once (only needed the first time — Chrome refuses `--remote-debugging-port` on the literal default profile dir, so a separate directory is required):
+   ```powershell
+   robocopy "$env:LOCALAPPDATA\Google\Chrome\User Data" "$env:GPT_TOOLS_HOME\chrome_cdp_profile" /E /XD Cache "Cache Cache" "Code Cache" GPUCache "Service Worker" GrShaderCache ShaderCache component_crx_cache extensions_crx_cache Sessions GPUPersistentCache
+   ```
+   (Close Chrome first so the copy isn't locked mid-file.)
+2. Launch a debug-profile Chrome and sign in once (SSO/PIV/MFA — whatever your org requires):
+   ```powershell
+   & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:GPT_TOOLS_HOME\chrome_cdp_profile" "https://your-sso-gateway-url"
+   ```
+3. Point the tool at it: `setx GPT_TOOLS_CDP_URL "http://localhost:9222"`.
+
+The debug-profile Chrome stays open in the background (it's a real Chrome window, not headless) — leave it running while using the tool. Sign-in persists in that profile going forward, so this is a one-time step per machine, not per session.
+
+**Never point `GPT_TOOLS_CDP_URL` at your actual daily-driver Chrome** — Chrome blocks `--remote-debugging-port` on the default profile directory specifically to stop this. The debug profile above is a separate copy for a reason.
+
+If your SSO gateway link re-prompts account selection on every visit (some IdPs do this by design), set `GPT_TOOLS_CHAT_URL` to the app's direct URL once you're signed in (e.g. `https://chatgpt.com/?model=auto`) — the gateway is only needed for the initial login, not every tool call. This is the default already; override only if your deployment's direct URL differs.
+
+## Running as a long-lived service (macOS only — see Windows setup above for Windows)
 
 If you have multiple Codex or Claude Code sessions open and want them all to use `gpt_image_gen` simultaneously, switch from stdio (one server per session) to HTTP (one shared server, all sessions are clients). The browser lives in the server, so there's only ever one Chromium accessing the profile.
 

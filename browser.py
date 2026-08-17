@@ -5,6 +5,16 @@ from playwright.async_api import async_playwright
 _STATE_HOME = os.environ.get("GPT_TOOLS_HOME") or os.path.dirname(os.path.abspath(__file__))
 USER_DATA_DIR = os.path.join(_STATE_HOME, "chatgpt_profile")
 DEBUG_DIR = os.path.join(_STATE_HOME, "debug")
+# ponytail: opt-in CDP attach to a real, already-logged-in Chrome instead of the
+# isolated profile below. Set GPT_TOOLS_CDP_URL (e.g. http://localhost:9222) and
+# launch Chrome with --remote-debugging-port=9222 first. Unset = old behavior.
+CDP_URL = os.environ.get("GPT_TOOLS_CDP_URL")
+# ponytail: go straight to chatgpt.com once logged in — the HHS SSO gateway
+# (go.hhs.gov/chatgpt) re-prompts account selection on every visit, which
+# breaks unattended tool calls. Only login.py needs the gateway URL, to
+# establish the SSO session in the first place.
+CHAT_URL = os.environ.get("GPT_TOOLS_CHAT_URL") or "https://chatgpt.com/?model=auto"
+SSO_LOGIN_URL = "https://go.hhs.gov/chatgpt"
 PROMPT_SELECTORS = [
     "#prompt-textarea",
     '[data-testid="prompt-textarea"]',
@@ -122,16 +132,21 @@ class ChatGPTBrowser:
     def __init__(self, headless=False):
         self.headless = headless
         self.playwright = None
+        self.browser = None  # only set in CDP mode; we don't own it, never close it
         self.context = None
         self._closed = False
 
     async def start(self):
         self.playwright = await async_playwright().start()
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
-            headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        if CDP_URL:
+            self.browser = await self.playwright.chromium.connect_over_cdp(CDP_URL)
+            self.context = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
+        else:
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=USER_DATA_DIR,
+                headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
         self.context.on("close", self._on_context_close)
         self._closed = False
 
@@ -151,7 +166,7 @@ class ChatGPTBrowser:
             self._closed = True
             raise RuntimeError(f"Failed to open new page (browser likely disconnected): {e}")
 
-        await page.goto("https://chatgpt.com/?model=auto", wait_until="domcontentloaded", timeout=60000)
+        await page.goto(CHAT_URL, wait_until="domcontentloaded", timeout=60000)
         try:
             await _find_prompt_locator(page, timeout_ms=30000)
         except ChatGPTRateLimitError:
@@ -168,7 +183,9 @@ class ChatGPTBrowser:
         return ChatGPTSession(page)
 
     async def close(self):
-        if self.context:
+        if self.context and self.browser is None:
+            # CDP mode: this context is the user's real browser — never close it,
+            # just disconnect below.
             try:
                 await self.context.close()
             except Exception:
