@@ -465,8 +465,17 @@ def _zip_current_project(root: str = ".") -> str:
     return zip_path
 
 
-async def _run_search_in_session(query: str, raw_output: bool = False, conversation_url: str | None = None, attach_zip: bool = False) -> str:
+async def _run_search_in_session(
+    query: str,
+    raw_output: bool = False,
+    conversation_url: str | None = None,
+    project: str | None = None,
+    attach_zip: bool = False,
+) -> str:
     async with _get_tab_semaphore():
+        if project and not conversation_url:
+            bot = await _get_browser()
+            conversation_url = await bot.find_project_conversation_id(project)
         session = await _new_session_with_retry(conversation_url=conversation_url)
         try:
             if attach_zip:
@@ -504,6 +513,7 @@ async def gpt_search(
     return_output: bool | None = None,
     output_json: bool = False,
     conversation_url: str | None = None,
+    project: str | None = None,
     attach_zip: bool = False,
 ) -> str:
     """Search the web or research a topic using ChatGPT.
@@ -516,12 +526,13 @@ async def gpt_search(
         output_file: Optional path where the cleaned markdown response should be saved. Parent directories are created if needed.
         return_output: When True, return the full response to the MCP client. When False, return only a short saved-path summary. Defaults to True unless `output_file` is provided, in which case it defaults to False to keep client context light.
         output_json: When True, try to parse/repair the response as JSON after ChatGPT returns. If `output_file` is provided, raw output is saved first and overwritten only when JSON post-processing succeeds. If post-processing fails, raw output is left in place.
-        conversation_url: A chatgpt.com/c/<id> URL (or just the <id>) to continue an existing conversation instead of starting a new chat. Get this by copying the URL from the ChatGPT tab while viewing the conversation you want to continue.
+        conversation_url: A chatgpt.com/c/<id> URL (or just the <id>) to continue an existing conversation instead of starting a new chat.
+        project: Name of an existing ChatGPT project (as shown in the sidebar) to continue instead of starting a new chat — resolves to that project's most recently active conversation via ChatGPT's own API (no sidebar clicking). Ignored if `conversation_url` is also given.
         attach_zip: When True, zip the current project directory (git-tracked + untracked-but-not-ignored files, or a plain walk if not a git repo) and attach it to the prompt before sending. Useful on the first message of a resumed chat, or any time ChatGPT needs the current repo state.
     """
     query = _read_search_prompt(query, prompt_file)
     result, saved_path, json_cleaned = _process_search_result(
-        await _run_search_in_session(query, raw_output=output_json, conversation_url=conversation_url, attach_zip=attach_zip),
+        await _run_search_in_session(query, raw_output=output_json, conversation_url=conversation_url, project=project, attach_zip=attach_zip),
         output_file,
         output_json,
     )

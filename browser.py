@@ -186,17 +186,58 @@ class ChatGPTBrowser:
             raise Exception(f"Failed to find chat input on new session. Screenshot: {shot_path}. Error: {e}")
         return ChatGPTSession(page)
 
+    async def _api_get(self, path: str, token: str | None = None) -> dict:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = await self.context.request.get(f"https://chatgpt.com{path}", headers=headers)
+        if not resp.ok:
+            raise Exception(f"ChatGPT API GET {path} failed: {resp.status} {await resp.text()}")
+        return await resp.json()
+
+    async def _get_access_token(self) -> str:
+        # Cookie-authenticated (no bearer needed for this one endpoint itself).
+        data = await self._api_get("/api/auth/session")
+        token = data.get("accessToken")
+        if not token:
+            raise Exception("No accessToken in /api/auth/session response — not logged in?")
+        return token
+
+    async def find_project_conversation_id(self, project_name: str, index: int = 0) -> str:
+        """Look up a ChatGPT project ("gizmo") by name and return the id of
+        one of its conversations (index 0 = most recent; the list comes back
+        pre-sorted by recency). Uses ChatGPT's own internal API — no sidebar
+        clicking — via the browser's already-authenticated session.
+
+        ponytail: DOM/sidebar automation (clicking through the "search
+        chats" UI to find a project's most recent thread) was tried first
+        and dropped — no stable search modal exists in the current UI, and
+        failed attempts left stray draft text sitting in the live composer,
+        one accidental Enter away from being sent into a real chat. This API
+        path has none of that risk. It's unofficial/reverse-engineered
+        (not a published OpenAI API), so it can break on a backend change —
+        same risk class as the DOM selectors elsewhere in this file.
+        """
+        token = await self._get_access_token()
+        sidebar = await self._api_get("/backend-api/gizmos/snorlax/sidebar", token=token)
+        match = next(
+            (
+                item["gizmo"] for item in sidebar.get("items", [])
+                if item.get("gizmo", {}).get("display", {}).get("name", "").lower() == project_name.lower()
+            ),
+            None,
+        )
+        if match is None:
+            raise Exception(f"No ChatGPT project named '{project_name}' found in your sidebar.")
+        gizmo_id = match["id"]
+
+        conversations = await self._api_get(f"/backend-api/gizmos/{gizmo_id}/conversations?cursor=", token=token)
+        items = conversations.get("items", [])
+        if not items or index >= len(items):
+            raise Exception(f"Project '{project_name}' has no conversation at index {index} (found {len(items)}).")
+        return items[index]["id"]
+
     async def resume_conversation(self, conversation_url_or_id: str):
         """Continue an existing ChatGPT conversation instead of starting a
         fresh one. Accepts a full chatgpt.com/c/<id> URL or just the <id>.
-
-        ponytail: sidebar/project-search automation (clicking through the
-        "search chats" UI to find a project's most recent thread) was tried
-        and dropped — no stable search modal exists in the current UI, and
-        failed attempts left stray draft text sitting in the live composer,
-        one accidental Enter away from being sent into a real chat. Direct
-        URL navigation has none of that risk and was proven reliable in
-        testing, so that's the only resume path for now.
         """
         conv_id = conversation_url_or_id.strip()
         if conv_id.startswith("http"):
