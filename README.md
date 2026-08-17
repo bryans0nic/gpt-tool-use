@@ -2,9 +2,10 @@
 
 MCP tools for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that drive ChatGPT via Playwright browser automation. The tools:
 
-- **`gpt_search`** — routes research queries through ChatGPT and returns clean markdown, or saves it directly to disk to keep the MCP client context light.
+- **`gpt_search`** — routes research queries through ChatGPT and returns clean markdown, or saves it directly to disk to keep the MCP client context light. Can resume an existing chat (`conversation_url`/`project`), attach files (`attach_zip`/`attach_files`), and set reasoning effort (`effort`) per call.
 - **`gpt_image_gen`** — sends an image-gen prompt, saves the generated images to disk, and returns them so Claude can analyze the result.
 - **`gpt_search_batch`** / **`gpt_image_gen_batch`** — run several prompts concurrently inside one MCP call, each in its own ChatGPT tab.
+- **`gpt_list_projects`** / **`gpt_search_conversations`** / **`gpt_read_conversation`** — discover what's already in your ChatGPT history and read it, without spending a message. No browser tab opened — all three call ChatGPT's own internal API directly.
 
 ## Why
 
@@ -216,9 +217,20 @@ Parameters:
 - `conversation_url` (optional) — a `chatgpt.com/c/<id>` URL (or just the `<id>`) to continue an existing conversation instead of starting a new one. Get this by copying the URL from the ChatGPT tab while viewing the conversation.
 - `project` (optional) — name of a ChatGPT project (as shown in the sidebar) to continue instead of starting a new chat. Resolves to that project's most recently active conversation via ChatGPT's own internal API (no sidebar clicking — see Notes below). Ignored if `conversation_url` is also given.
 - `attach_zip` (optional) — when `True`, zip the current project directory (git-tracked + untracked-but-not-ignored files if it's a git repo, otherwise a plain walk minus junk dirs) and attach it to the prompt via drag-and-drop simulation before sending. Useful on the first message of a resumed chat, or whenever ChatGPT needs the current repo state instead of a manual copy-paste.
+- `attach_files` (optional) — list of specific local file paths (images, docs, anything) to attach before sending. Combine with `attach_zip` if you want both the whole project and a specific extra file.
 - `effort` (optional) — one of `instant`, `medium`, `high`, `extra high`, `pro` (case-insensitive), set on the composer's reasoning-effort slider before sending. Leaves whatever's currently selected if omitted. Use `instant` for quick low-stakes queries, `pro` for genuinely hard problems.
 
 Relative file paths resolve from the MCP server process working directory. Use absolute paths if the server is running as a long-lived HTTP/launchd service.
+
+## Discovering and reading existing ChatGPT history
+
+Three tools read your ChatGPT account without opening a browser tab at all — each is a couple of direct calls to ChatGPT's own internal API (the same one the web app itself uses), via the browser's already-authenticated session:
+
+- **`gpt_list_projects()`** — lists your project names, so Claude can discover what exists instead of needing to be told the exact name up front.
+- **`gpt_search_conversations(query, limit=10)`** — searches your conversation history by keyword (title and message content), across all chats, not just one project. Same search ChatGPT's own "Search chats" UI uses. Returns each match's title, a content snippet, and its id.
+- **`gpt_read_conversation(conversation_url)`** — reads a conversation's *entire* prior transcript (every user/assistant turn, oldest first), without spending a message asking ChatGPT to recap it. Walks the message tree's active path (via each node's `parent` pointer, from `current_node` back to the root) so a regenerated/abandoned branch doesn't pollute the result.
+
+Typical flow: `gpt_search_conversations("topic")` to find the right chat → `gpt_read_conversation(id)` to catch up on it → `gpt_search(query=..., conversation_url=id)` to continue it.
 
 Example:
 

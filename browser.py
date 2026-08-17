@@ -267,6 +267,84 @@ class ChatGPTBrowser:
             raise Exception(f"Project '{project_name}' has no conversation at index {index} (found {len(items)}).")
         return items[index]["id"]
 
+    async def list_projects(self) -> list[dict]:
+        """List your ChatGPT projects (name + id), via the same sidebar API
+        used by find_project_conversation_id. No page needed.
+        """
+        token = await self._get_access_token()
+        sidebar = await self._api_get("/backend-api/gizmos/snorlax/sidebar", token=token)
+        return [
+            {"id": item["gizmo"]["id"], "name": name}
+            for item in sidebar.get("items", [])
+            if (name := item.get("gizmo", {}).get("display", {}).get("name"))
+        ]
+
+    async def search_conversations(self, query: str, limit: int = 10) -> list[dict]:
+        """Search your ChatGPT conversation history by keyword (title and
+        message content) via ChatGPT's own search endpoint — the same one
+        the "Search chats" UI uses. Not project-scoped. No page needed.
+        """
+        import urllib.parse
+
+        token = await self._get_access_token()
+        encoded = urllib.parse.quote(query)
+        data = await self._api_get(f"/backend-api/conversations/search?query={encoded}&limit={limit}", token=token)
+        results = []
+        for item in data.get("items", []):
+            payload = item.get("payload", {})
+            results.append({
+                "id": item.get("conversation_id"),
+                "title": item.get("title"),
+                "snippet": payload.get("snippet"),
+                "update_time": item.get("update_time"),
+            })
+        return results
+
+    async def get_conversation_history(self, conversation_url_or_id: str) -> list[dict]:
+        """Read the full transcript of a conversation — every prior user and
+        assistant turn, oldest first — without spending a message asking
+        ChatGPT to recap. No page needed; uses the same internal
+        /backend-api/conversation/<id> endpoint the web app itself loads on
+        open.
+
+        Walks the message tree from current_node back to the root via each
+        node's parent pointer — the *active* path only, so a regenerated/
+        abandoned branch doesn't pollute the transcript — then reverses it.
+        Skips non-text content (images, tool calls) and thinking-preamble
+        stub messages, keeping only real user/assistant text turns.
+        """
+        conv_id = conversation_url_or_id.strip()
+        if conv_id.startswith("http"):
+            conv_id = conv_id.rstrip("/").split("/c/")[-1].split("?")[0]
+
+        token = await self._get_access_token()
+        data = await self._api_get(f"/backend-api/conversation/{conv_id}", token=token)
+        mapping = data.get("mapping", {})
+
+        turns = []
+        node_id = data.get("current_node")
+        while node_id:
+            node = mapping.get(node_id)
+            if node is None:
+                break
+            message = node.get("message")
+            if message:
+                role = message.get("author", {}).get("role")
+                content = message.get("content", {})
+                is_preamble = message.get("metadata", {}).get("is_thinking_preamble_message")
+                if role in ("user", "assistant") and content.get("content_type") == "text" and not is_preamble:
+                    parts = [p for p in content.get("parts", []) if isinstance(p, str) and p.strip()]
+                    if parts:
+                        turns.append({
+                            "role": role,
+                            "text": "\n".join(parts),
+                            "create_time": message.get("create_time"),
+                        })
+            node_id = node.get("parent")
+
+        turns.reverse()
+        return turns
+
     async def resume_conversation(self, conversation_url_or_id: str):
         """Continue an existing ChatGPT conversation instead of starting a
         fresh one. Accepts a full chatgpt.com/c/<id> URL or just the <id>.

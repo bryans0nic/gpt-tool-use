@@ -471,6 +471,7 @@ async def _run_search_in_session(
     conversation_url: str | None = None,
     project: str | None = None,
     attach_zip: bool = False,
+    attach_files: list[str] | None = None,
     effort: str | None = None,
 ) -> str:
     async with _get_tab_semaphore():
@@ -490,6 +491,8 @@ async def _run_search_in_session(
                         os.unlink(zip_path)
                     except OSError:
                         pass
+            for file_path in (attach_files or []):
+                await session.attach_file(str(Path(file_path).expanduser().resolve()))
             result = ""
             async for chunk in session.stream_message(query, raw_output=raw_output):
                 if chunk["type"] == "final":
@@ -518,6 +521,7 @@ async def gpt_search(
     conversation_url: str | None = None,
     project: str | None = None,
     attach_zip: bool = False,
+    attach_files: list[str] | None = None,
     effort: str | None = None,
 ) -> str:
     """Search the web or research a topic using ChatGPT.
@@ -533,11 +537,12 @@ async def gpt_search(
         conversation_url: A chatgpt.com/c/<id> URL (or just the <id>) to continue an existing conversation instead of starting a new chat.
         project: Name of an existing ChatGPT project (as shown in the sidebar) to continue instead of starting a new chat — resolves to that project's most recently active conversation via ChatGPT's own API (no sidebar clicking). Ignored if `conversation_url` is also given.
         attach_zip: When True, zip the current project directory (git-tracked + untracked-but-not-ignored files, or a plain walk if not a git repo) and attach it to the prompt before sending. Useful on the first message of a resumed chat, or any time ChatGPT needs the current repo state.
+        attach_files: Optional list of specific local file paths (images, docs, anything) to attach before sending. Combine with attach_zip if you want both the whole project and a specific extra file.
         effort: Reasoning effort for this message only — one of "instant", "medium", "high", "extra high", "pro" (case-insensitive). Set before sending; leaves whatever's currently selected if omitted. Higher effort is slower but more thorough; use "instant" for quick low-stakes queries and "pro" for genuinely hard problems.
     """
     query = _read_search_prompt(query, prompt_file)
     result, saved_path, json_cleaned = _process_search_result(
-        await _run_search_in_session(query, raw_output=output_json, conversation_url=conversation_url, project=project, attach_zip=attach_zip, effort=effort),
+        await _run_search_in_session(query, raw_output=output_json, conversation_url=conversation_url, project=project, attach_zip=attach_zip, attach_files=attach_files, effort=effort),
         output_file,
         output_json,
     )
@@ -551,6 +556,61 @@ async def gpt_search(
         return _completed_search_summary(json_cleaned)
 
     return result
+
+
+@mcp.tool()
+async def gpt_list_projects() -> str:
+    """List your ChatGPT projects (name + id). No browser tab opened — a
+    direct call to ChatGPT's own internal API. Use this before `project=`
+    on gpt_search when you don't already know the exact project name.
+    """
+    bot = await _get_browser()
+    projects = await bot.list_projects()
+    if not projects:
+        return "No ChatGPT projects found."
+    return "\n".join(f"- {p['name']}" for p in projects)
+
+
+@mcp.tool()
+async def gpt_search_conversations(query: str, limit: int = 10) -> str:
+    """Search your ChatGPT conversation history by keyword (title and
+    message content) — the same search ChatGPT's own "Search chats" UI
+    does. Not limited to a single project. No browser tab opened.
+
+    Returns each match's title, a snippet, and its id — pass the id (or
+    build a chatgpt.com/c/<id> URL from it) into gpt_search's
+    conversation_url, or into gpt_read_conversation, to use a specific
+    result rather than always the most recent.
+    """
+    bot = await _get_browser()
+    results = await bot.search_conversations(query, limit=limit)
+    if not results:
+        return f"No conversations found matching '{query}'."
+    lines = []
+    for r in results:
+        lines.append(f"- **{r['title']}** (id: `{r['id']}`)\n  {r['snippet'] or ''}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def gpt_read_conversation(conversation_url: str) -> str:
+    """Read the full transcript of a ChatGPT conversation — every prior
+    user and assistant turn, oldest first — without spending a message
+    asking ChatGPT to recap it. No browser tab opened; reads via the same
+    internal API the web app itself loads on open.
+
+    Args:
+        conversation_url: A chatgpt.com/c/<id> URL (or just the <id>).
+    """
+    bot = await _get_browser()
+    turns = await bot.get_conversation_history(conversation_url)
+    if not turns:
+        return "No messages found in that conversation."
+    lines = []
+    for t in turns:
+        label = "You" if t["role"] == "user" else "ChatGPT"
+        lines.append(f"**{label}:** {t['text']}")
+    return "\n\n".join(lines)
 
 
 @mcp.tool()
