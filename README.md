@@ -113,6 +113,28 @@ The debug-profile Chrome stays open in the background (it's a real Chrome window
 
 If your SSO gateway link re-prompts account selection on every visit (some IdPs do this by design), set `GPT_TOOLS_CHAT_URL` to the app's direct URL once you're signed in (e.g. `https://chatgpt.com/?model=auto`) — the gateway is only needed for the initial login, not every tool call. This is the default already; override only if your deployment's direct URL differs.
 
+#### Keeping the debug Chrome alive: `chrome_watchdog.py`
+
+The debug-profile Chrome is a foreground window someone can accidentally close, and every `gpt_search`/`gpt_image_gen` call fails until it's relaunched. `chrome_watchdog.py` polls `GPT_TOOLS_CDP_URL` every 20s and relaunches Chrome (same profile/flags as above) if it's down:
+
+```powershell
+python chrome_watchdog.py
+```
+
+To run it automatically at login without touching system settings (no Task Scheduler/registry — those need elevation this setup deliberately doesn't request), drop a shortcut in your personal Startup folder:
+
+```powershell
+$startupDir = [Environment]::GetFolderPath('Startup')
+$ws = New-Object -ComObject WScript.Shell
+$shortcut = $ws.CreateShortcut((Join-Path $startupDir "GPT-Tools Chrome Watchdog.lnk"))
+$shortcut.TargetPath = "C:\path\to\gpt-tool-use\.venv\Scripts\pythonw.exe"  # pythonw = no console window
+$shortcut.Arguments = '"C:\path\to\gpt-tool-use\chrome_watchdog.py"'
+$shortcut.WorkingDirectory = "C:\path\to\gpt-tool-use"
+$shortcut.Save()
+```
+
+Verified live: killing the debug Chrome mid-session, the watchdog relaunched it within one poll cycle, and the relaunched session was still signed in (same persistent profile) — a `gpt_search` call right after came back clean.
+
 ## Running as a long-lived service (macOS only — see Windows setup above for Windows)
 
 If you have multiple Codex or Claude Code sessions open and want them all to use `gpt_image_gen` simultaneously, switch from stdio (one server per session) to HTTP (one shared server, all sessions are clients). The browser lives in the server, so there's only ever one Chromium accessing the profile.
@@ -263,6 +285,7 @@ Parameters:
 | `browser.py` | Playwright ChatGPT automation; both text-streaming and image-gen flows |
 | `gpt_search.py` | Standalone CLI wrapper (text only) |
 | `login.py` | First-run helper for ChatGPT login |
+| `chrome_watchdog.py` | Keeps the CDP debug Chrome alive — relaunches it if the window gets closed |
 | `tests/test_mcp_server.py` | Unit tests for the JSON-normalization and prompt helpers |
 
 ## Notes
