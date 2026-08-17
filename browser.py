@@ -117,6 +117,35 @@ async def _dismiss_rate_limit_if_present(page, debug_name: str) -> str | None:
     return message
 
 
+async def _attempt_recovery(page) -> bool:
+    """Best-effort recovery from an unknown stuck state: dismiss whatever's
+    blocking (a leftover overlay, a stray dialog) without ever submitting or
+    navigating anything. Returns True if it did something, so the caller
+    knows whether a retry is worth attempting.
+
+    ponytail: deterministic and narrow on purpose — only dismiss actions
+    (Escape, closing known dialog buttons), nothing that could misfire on a
+    real authenticated account. If this proves insufficient for a stuck
+    state it can't name, that's the signal to add a vision-model fallback
+    (screenshot + AI-chosen action) rather than widening this blindly.
+    """
+    acted = False
+    try:
+        await page.keyboard.press("Escape")
+        acted = True
+    except Exception:
+        pass
+    for text in ("Got it", "OK", "Close", "Dismiss"):
+        button = page.get_by_role("button", name=text)
+        try:
+            if await button.count() and await button.first.is_visible():
+                await button.first.click()
+                acted = True
+        except Exception:
+            continue
+    return acted
+
+
 async def _find_prompt_locator(page, timeout_ms: int = 30000):
     deadline = timeout_ms
     while deadline > 0:
@@ -371,13 +400,23 @@ class ChatGPTSession:
         )
 
         # Wait for the file chip's upload-in-progress spinner to clear.
-        deadline = timeout_ms
-        while deadline > 0:
-            uploading = await self.page.locator('[class*="animate-spin"], [aria-label*="uploading" i]').count()
-            if not uploading:
-                return
-            await self.page.wait_for_timeout(500)
-            deadline -= 500
+        async def _upload_done(budget_ms: int) -> bool:
+            remaining = budget_ms
+            while remaining > 0:
+                uploading = await self.page.locator('[class*="animate-spin"], [aria-label*="uploading" i]').count()
+                if not uploading:
+                    return True
+                await self.page.wait_for_timeout(500)
+                remaining -= 500
+            return False
+
+        if await _upload_done(timeout_ms):
+            return
+
+        # Stuck — try dismissing whatever's blocking (e.g. the drop-zone
+        # overlay staying up) and give it a shorter second window.
+        if await _attempt_recovery(self.page) and await _upload_done(15000):
+            return
 
         shot_path = _debug_path("debug_attach_timeout.png")
         try:
@@ -419,24 +458,39 @@ class ChatGPTSession:
 
         rate_limit_message = await self._send_prompt(message)
 
-        wait_time = 0
-        while wait_time < 30000:
-            rate_limit_message = await _dismiss_rate_limit_if_present(self.page, "debug_rate_limit_text_wait.png") or rate_limit_message
-            current_count = len(await self.page.query_selector_all('div[data-message-author-role="assistant"]'))
-            if current_count > count_before:
-                break
-            await self.page.wait_for_timeout(500)
-            wait_time += 500
+        async def _wait_for_message() -> bool:
+            waited = 0
+            while waited < 30000:
+                nonlocal rate_limit_message
+                rate_limit_message = await _dismiss_rate_limit_if_present(self.page, "debug_rate_limit_text_wait.png") or rate_limit_message
+                current_count = len(await self.page.query_selector_all('div[data-message-author-role="assistant"]'))
+                if current_count > count_before:
+                    return True
+                await self.page.wait_for_timeout(500)
+                waited += 500
+            return False
 
-        if wait_time >= 30000:
-            shot_path = _debug_path("debug_send.png")
-            try:
-                await self.page.screenshot(path=shot_path)
-            except Exception:
-                pass
-            if rate_limit_message:
-                raise ChatGPTRateLimitError(f"ChatGPT rate limit dialog was dismissed, but no assistant response appeared: {rate_limit_message}. Screenshot: {shot_path}")
-            raise Exception(f"Timeout waiting for assistant message to appear. Screenshot: {shot_path}")
+        if not await _wait_for_message():
+            # Stuck — try a deterministic recovery (dismiss whatever's
+            # blocking, e.g. a leftover overlay) and resend once before
+            # giving up. Covers exactly the class of stuck state hit
+            # repeatedly during development today (a stale drop-zone
+            # overlay swallowing the send).
+            if await _attempt_recovery(self.page):
+                rate_limit_message = await self._send_prompt(message) or rate_limit_message
+                sent_ok = await _wait_for_message()
+            else:
+                sent_ok = False
+
+            if not sent_ok:
+                shot_path = _debug_path("debug_send.png")
+                try:
+                    await self.page.screenshot(path=shot_path)
+                except Exception:
+                    pass
+                if rate_limit_message:
+                    raise ChatGPTRateLimitError(f"ChatGPT rate limit dialog was dismissed, but no assistant response appeared: {rate_limit_message}. Screenshot: {shot_path}")
+                raise Exception(f"Timeout waiting for assistant message to appear (recovery attempted). Screenshot: {shot_path}")
 
         last_text = ""
         stable_count = 0
