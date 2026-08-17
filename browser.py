@@ -24,6 +24,9 @@ PROMPT_SELECTORS = [
     'div[contenteditable="true"]',
     'textarea[placeholder*="Ask"]',
 ]
+# The reasoning-effort slider's 5 stops, in ascending order — confirmed live
+# by walking a fresh slider from Home (0) to End (4) and reading its label.
+EFFORT_LEVELS = ["instant", "medium", "high", "extra high", "pro"]
 RATE_LIMIT_TITLE = "too many requests"
 RATE_LIMIT_SNIPPETS = [
     "making requests too quickly",
@@ -288,6 +291,43 @@ class ChatGPTSession:
             await self.page.close()
         except Exception:
             pass
+
+    async def set_effort(self, level: str):
+        """Set the reasoning-effort slider before sending. `level` is one of
+        EFFORT_LEVELS (case-insensitive): instant, medium, high, extra high, pro.
+
+        Confirmed live: it's a 5-stop slider (role="slider", aria-valuenow
+        0-4), not a click-menu of discrete options — opened via the
+        composer's model/effort pill (`.__composer-pill`). Keyboard control
+        (Home to reset to 0, then ArrowRight N times) is reliable; dragging
+        would be needlessly fragile by comparison.
+        """
+        normalized = level.strip().lower()
+        if normalized not in EFFORT_LEVELS:
+            raise ValueError(f"Unknown effort level {level!r}. Choose one of: {', '.join(EFFORT_LEVELS)}")
+        target = EFFORT_LEVELS.index(normalized)
+
+        pill = self.page.locator(".__composer-pill").first
+        await pill.click(timeout=10000)
+        await self.page.wait_for_timeout(400)
+
+        slider = self.page.locator('[role="slider"]').first
+        await slider.wait_for(state="visible", timeout=10000)
+        await slider.focus()
+        await self.page.keyboard.press("Home")
+        for _ in range(target):
+            await self.page.keyboard.press("ArrowRight")
+        await self.page.wait_for_timeout(200)
+
+        actual = await slider.get_attribute("aria-valuenow")
+        await self.page.keyboard.press("Escape")
+        if actual != str(target):
+            shot_path = _debug_path("debug_effort_mismatch.png")
+            try:
+                await self.page.screenshot(path=shot_path)
+            except Exception:
+                pass
+            raise Exception(f"Effort slider landed on {actual!r}, expected {target!r} ({level}). Screenshot: {shot_path}")
 
     async def attach_file(self, file_path: str, timeout_ms: int = 60000):
         """Attach a file to the prompt by simulating a drag-and-drop onto the

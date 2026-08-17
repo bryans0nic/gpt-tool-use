@@ -194,6 +194,7 @@ Parameters:
 - `conversation_url` (optional) — a `chatgpt.com/c/<id>` URL (or just the `<id>`) to continue an existing conversation instead of starting a new one. Get this by copying the URL from the ChatGPT tab while viewing the conversation.
 - `project` (optional) — name of a ChatGPT project (as shown in the sidebar) to continue instead of starting a new chat. Resolves to that project's most recently active conversation via ChatGPT's own internal API (no sidebar clicking — see Notes below). Ignored if `conversation_url` is also given.
 - `attach_zip` (optional) — when `True`, zip the current project directory (git-tracked + untracked-but-not-ignored files if it's a git repo, otherwise a plain walk minus junk dirs) and attach it to the prompt via drag-and-drop simulation before sending. Useful on the first message of a resumed chat, or whenever ChatGPT needs the current repo state instead of a manual copy-paste.
+- `effort` (optional) — one of `instant`, `medium`, `high`, `extra high`, `pro` (case-insensitive), set on the composer's reasoning-effort slider before sending. Leaves whatever's currently selected if omitted. Use `instant` for quick low-stakes queries, `pro` for genuinely hard problems.
 
 Relative file paths resolve from the MCP server process working directory. Use absolute paths if the server is running as a long-lived HTTP/launchd service.
 
