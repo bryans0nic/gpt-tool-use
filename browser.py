@@ -1,5 +1,7 @@
 import os
+import re
 import asyncio
+from pathlib import Path
 from playwright.async_api import async_playwright
 
 _STATE_HOME = os.environ.get("GPT_TOOLS_HOME") or os.path.dirname(os.path.abspath(__file__))
@@ -157,15 +159,17 @@ class ChatGPTBrowser:
     def is_alive(self) -> bool:
         return self.context is not None and not self._closed
 
-    async def new_session(self):
+    async def _new_page(self):
         if not self.is_alive:
             raise RuntimeError("Browser context is not alive; call start() first.")
         try:
-            page = await self.context.new_page()
+            return await self.context.new_page()
         except Exception as e:
             self._closed = True
             raise RuntimeError(f"Failed to open new page (browser likely disconnected): {e}")
 
+    async def new_session(self):
+        page = await self._new_page()
         await page.goto(CHAT_URL, wait_until="domcontentloaded", timeout=60000)
         try:
             await _find_prompt_locator(page, timeout_ms=30000)
@@ -180,6 +184,42 @@ class ChatGPTBrowser:
                 pass
             await page.close()
             raise Exception(f"Failed to find chat input on new session. Screenshot: {shot_path}. Error: {e}")
+        return ChatGPTSession(page)
+
+    async def resume_conversation(self, conversation_url_or_id: str):
+        """Continue an existing ChatGPT conversation instead of starting a
+        fresh one. Accepts a full chatgpt.com/c/<id> URL or just the <id>.
+
+        ponytail: sidebar/project-search automation (clicking through the
+        "search chats" UI to find a project's most recent thread) was tried
+        and dropped — no stable search modal exists in the current UI, and
+        failed attempts left stray draft text sitting in the live composer,
+        one accidental Enter away from being sent into a real chat. Direct
+        URL navigation has none of that risk and was proven reliable in
+        testing, so that's the only resume path for now.
+        """
+        conv_id = conversation_url_or_id.strip()
+        if conv_id.startswith("http"):
+            url = conv_id
+        else:
+            conv_id = conv_id.rstrip("/").rsplit("/", 1)[-1]
+            url = f"https://chatgpt.com/c/{conv_id}"
+
+        page = await self._new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await _find_prompt_locator(page, timeout_ms=30000)
+        except ChatGPTRateLimitError:
+            await page.close()
+            raise
+        except Exception as e:
+            shot_path = _debug_path("debug_resume_conversation.png")
+            try:
+                await page.screenshot(path=shot_path)
+            except Exception:
+                pass
+            await page.close()
+            raise Exception(f"Failed to resume conversation '{conversation_url_or_id}'. Screenshot: {shot_path}. Error: {e}")
         return ChatGPTSession(page)
 
     async def close(self):
@@ -208,6 +248,63 @@ class ChatGPTSession:
         except Exception:
             pass
 
+    async def attach_file(self, file_path: str, timeout_ms: int = 60000):
+        """Attach a file to the prompt by simulating a drag-and-drop onto the
+        composer, and wait for the upload to finish before returning.
+
+        ponytail: the composer's "Add files and more" button was tried first
+        (menu scan, force-click, expect_file_chooser) and produced no
+        observable effect in testing — no menu, no native dialog. Drop-zone
+        simulation is the standard Playwright workaround for exactly this
+        case and was confirmed working live: dispatching synthetic
+        dragenter/dragover/drop events with a DataTransfer built from the
+        file's own bytes (base64-round-tripped through the page).
+        """
+        import base64
+
+        data = base64.b64encode(Path(file_path).read_bytes()).decode()
+        filename = os.path.basename(file_path)
+        prompt = await _find_prompt_locator(self.page, timeout_ms=30000)
+
+        await prompt.evaluate(
+            '''
+            (el, { data, filename }) => {
+                const binary = atob(data);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const file = new File([bytes], filename);
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                const opts = { bubbles: true, cancelable: true, dataTransfer: dt };
+                el.dispatchEvent(new DragEvent("dragenter", opts));
+                el.dispatchEvent(new DragEvent("dragover", opts));
+                el.dispatchEvent(new DragEvent("drop", opts));
+                // Close out the drag state — without a matching dragleave/dragend,
+                // the "drop files here" overlay stays up and can swallow the
+                // Enter keypress meant to send the message.
+                el.dispatchEvent(new DragEvent("dragleave", opts));
+                el.dispatchEvent(new DragEvent("dragend", opts));
+            }
+            ''',
+            {"data": data, "filename": filename},
+        )
+
+        # Wait for the file chip's upload-in-progress spinner to clear.
+        deadline = timeout_ms
+        while deadline > 0:
+            uploading = await self.page.locator('[class*="animate-spin"], [aria-label*="uploading" i]').count()
+            if not uploading:
+                return
+            await self.page.wait_for_timeout(500)
+            deadline -= 500
+
+        shot_path = _debug_path("debug_attach_timeout.png")
+        try:
+            await self.page.screenshot(path=shot_path)
+        except Exception:
+            pass
+        raise Exception(f"Timed out waiting for file upload to finish. Screenshot: {shot_path}")
+
     async def _send_prompt(self, message: str):
         last_error = None
         for _ in range(3):
@@ -219,6 +316,19 @@ class ChatGPTSession:
                 last_error = e
                 continue
             await self.page.wait_for_timeout(250)
+
+            # ponytail: Enter doesn't always submit right after a drag-drop
+            # attach — the composer's internal "attachment ready" state can
+            # lag the visible DOM when the file arrived via synthetic events
+            # instead of a real user drop. If the text is still sitting
+            # there unsent, fall back to clicking the actual send button.
+            still_there = (await prompt.inner_text()).strip() == message.strip()
+            if still_there:
+                send_button = self.page.locator('[data-testid="send-button"], button[aria-label*="send" i]').first
+                if await send_button.count() and await send_button.is_visible():
+                    await send_button.click()
+                    await self.page.wait_for_timeout(250)
+
             return await _dismiss_rate_limit_if_present(self.page, "debug_rate_limit_send.png")
         raise Exception(f"Failed to fill the ChatGPT prompt input after 3 attempts (input kept going stale): {last_error}")
 

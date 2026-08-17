@@ -191,6 +191,8 @@ Parameters:
 - `output_file` (optional) — path where the cleaned markdown response should be saved. Parent directories are created automatically.
 - `return_output` (optional) — when `False`, Claude only gets a short saved-path summary. Defaults to `True` unless `output_file` is provided; with `output_file`, it defaults to `False` to avoid filling Claude's context with the full response.
 - `output_json` (optional) — when `True`, best-effort normalize the response to valid JSON after ChatGPT returns; if parsing/repair fails, leave the raw output unchanged.
+- `conversation_url` (optional) — a `chatgpt.com/c/<id>` URL (or just the `<id>`) to continue an existing conversation instead of starting a new one. Get this by copying the URL from the ChatGPT tab while viewing the conversation. There's no automated "find my project's most recent chat" — that was tried and dropped (see Notes below); paste the URL explicitly.
+- `attach_zip` (optional) — when `True`, zip the current project directory (git-tracked + untracked-but-not-ignored files if it's a git repo, otherwise a plain walk minus junk dirs) and attach it to the prompt via drag-and-drop simulation before sending. Useful on the first message of a resumed chat, or whenever ChatGPT needs the current repo state instead of a manual copy-paste.
 
 Relative file paths resolve from the MCP server process working directory. Use absolute paths if the server is running as a long-lived HTTP/launchd service.
 
@@ -267,6 +269,9 @@ Parameters:
 - Browser runs headed by default so you can complete the ChatGPT login on first run, and so you can watch image gen progress when debugging.
 - `gpt_image_gen` saves images relative to the Claude Code cwd, not the MCP server's source directory — so files land in whatever project Claude is working on.
 - Failures raise: send timeouts, stream timeouts, and rate-limit dead ends surface as tool-call errors (with a debug screenshot path under `debug/`) instead of error text masquerading as a response.
+- **File attach uses simulated drag-and-drop, not the "Add files and more" button.** That button was tried first (menu scan, force-click, `expect_file_chooser`) and produced no observable effect in live testing — no menu, no native dialog. Drag-and-drop (`ChatGPTSession.attach_file` in `browser.py`) dispatches synthetic `dragenter`/`dragover`/`drop`/`dragleave`/`dragend` events with a `DataTransfer` built from the file's own bytes, and is confirmed working. If a future ChatGPT UI change breaks this, revisit the button-click path rather than assuming drag-drop is the only option.
+- **After a drag-drop attach, Enter doesn't always submit.** The composer's internal "attachment ready" state can lag the visible DOM when a file arrives via synthetic events instead of a real user drop. `_send_prompt` in `browser.py` checks whether the text is still sitting unsent after `Enter` and falls back to clicking the send button (`[data-testid="send-button"]`) if so — this applies to every `gpt_search`/`gpt_image_gen` call, not just attach, so it's a safety net rather than an attach-specific special case.
+- **No automated "resume my project's most recent chat."** This was attempted (clicking through the sidebar/search UI to find a named project and open its latest thread) and dropped after repeated live-testing showed real fragility: an ambiguous "search chats" button, no stable search modal (Ctrl+K opens nothing in this UI version), and — the actual dealbreaker — failed attempts left stray draft text sitting in the live composer, one accidental `Enter` away from being sent into a real conversation. `conversation_url` (direct `chatgpt.com/c/<id>` navigation) has none of that risk and is the only resume path for now.
 
 ## Development
 

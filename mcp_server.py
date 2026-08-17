@@ -7,6 +7,10 @@ import base64
 import hashlib
 import json
 import re
+import subprocess
+import tempfile
+import time
+import zipfile
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent, ImageContent
@@ -414,19 +418,66 @@ def _save_search_result(result: str, output_file: str | None) -> Path | None:
     return saved_path
 
 
-async def _new_session_with_retry():
+async def _new_session_with_retry(conversation_url: str | None = None):
     bot = await _get_browser()
+    opener = (lambda b: b.resume_conversation(conversation_url)) if conversation_url else (lambda b: b.new_session())
     try:
-        return await bot.new_session()
+        return await opener(bot)
     except RuntimeError:
         bot = await _get_browser()
-        return await bot.new_session()
+        return await opener(bot)
 
 
-async def _run_search_in_session(query: str, raw_output: bool = False) -> str:
+def _zip_current_project(root: str = ".") -> str:
+    """Zip the current project (tracked + untracked-but-not-ignored files, if
+    it's a git repo; everything minus common junk dirs otherwise) to a temp
+    file, for attaching to a ChatGPT prompt. Caller is responsible for
+    cleanup.
+    """
+    root = os.path.abspath(root)
+    name = os.path.basename(root.rstrip(os.sep)) or "project"
+    zip_path = os.path.join(tempfile.gettempdir(), f"{name}-{int(time.time())}.zip")
+
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard"],
+            cwd=root, capture_output=True, text=True, check=True, timeout=30,
+        ).stdout.splitlines()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        listed = None
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        if listed is not None:
+            for rel in listed:
+                fp = os.path.join(root, rel)
+                if os.path.isfile(fp):
+                    zf.write(fp, rel)
+        else:
+            # ponytail: not a git repo — fall back to a plain walk, skipping
+            # the usual junk dirs, rather than teaching this an ignore-file parser.
+            skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                for fn in filenames:
+                    fp = os.path.join(dirpath, fn)
+                    zf.write(fp, os.path.relpath(fp, root))
+
+    return zip_path
+
+
+async def _run_search_in_session(query: str, raw_output: bool = False, conversation_url: str | None = None, attach_zip: bool = False) -> str:
     async with _get_tab_semaphore():
-        session = await _new_session_with_retry()
+        session = await _new_session_with_retry(conversation_url=conversation_url)
         try:
+            if attach_zip:
+                zip_path = _zip_current_project()
+                try:
+                    await session.attach_file(zip_path)
+                finally:
+                    try:
+                        os.unlink(zip_path)
+                    except OSError:
+                        pass
             result = ""
             async for chunk in session.stream_message(query, raw_output=raw_output):
                 if chunk["type"] == "final":
@@ -452,6 +503,8 @@ async def gpt_search(
     output_file: str | None = None,
     return_output: bool | None = None,
     output_json: bool = False,
+    conversation_url: str | None = None,
+    attach_zip: bool = False,
 ) -> str:
     """Search the web or research a topic using ChatGPT.
 
@@ -463,10 +516,12 @@ async def gpt_search(
         output_file: Optional path where the cleaned markdown response should be saved. Parent directories are created if needed.
         return_output: When True, return the full response to the MCP client. When False, return only a short saved-path summary. Defaults to True unless `output_file` is provided, in which case it defaults to False to keep client context light.
         output_json: When True, try to parse/repair the response as JSON after ChatGPT returns. If `output_file` is provided, raw output is saved first and overwritten only when JSON post-processing succeeds. If post-processing fails, raw output is left in place.
+        conversation_url: A chatgpt.com/c/<id> URL (or just the <id>) to continue an existing conversation instead of starting a new chat. Get this by copying the URL from the ChatGPT tab while viewing the conversation you want to continue.
+        attach_zip: When True, zip the current project directory (git-tracked + untracked-but-not-ignored files, or a plain walk if not a git repo) and attach it to the prompt before sending. Useful on the first message of a resumed chat, or any time ChatGPT needs the current repo state.
     """
     query = _read_search_prompt(query, prompt_file)
     result, saved_path, json_cleaned = _process_search_result(
-        await _run_search_in_session(query, raw_output=output_json),
+        await _run_search_in_session(query, raw_output=output_json, conversation_url=conversation_url, attach_zip=attach_zip),
         output_file,
         output_json,
     )
