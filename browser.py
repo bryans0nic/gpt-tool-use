@@ -503,32 +503,67 @@ class ChatGPTSession:
             pass
         raise Exception(f"Timed out waiting for file upload to finish. Screenshot: {shot_path}")
 
+    async def _fill_prompt(self, prompt, message: str):
+        """Fill the contenteditable prompt, using an execCommand fallback
+        when fill() sets the DOM but doesn't fire React's synthetic input
+        events — observed intermittently in CDP-attach mode against a real
+        Chrome browser, and the actual root cause behind "Enter does
+        nothing": React's internal state stays empty even though the box
+        visually shows the text, so there's nothing (from React's view) to
+        submit.
+        """
+        await prompt.fill(message, timeout=5000)
+        await self.page.wait_for_timeout(100)
+
+        if (await prompt.inner_text()).strip() == message.strip():
+            return  # fill() triggered React state correctly
+
+        # fill() set the DOM content but React's internal state is still
+        # empty. execCommand('insertText') fires an InputEvent with
+        # inputType='insertText' that React's synthetic event system handles.
+        await prompt.evaluate(
+            "(el, text) => { el.focus(); document.execCommand('selectAll', false, null); document.execCommand('insertText', false, text); }",
+            message,
+        )
+        await self.page.wait_for_timeout(150)
+
     async def _send_prompt(self, message: str):
         last_error = None
         for _ in range(3):
             prompt = await _find_prompt_locator(self.page, timeout_ms=30000)
             try:
-                await prompt.fill(message, timeout=5000)
+                await self._fill_prompt(prompt, message)
                 await prompt.press("Enter", timeout=5000)
             except Exception as e:
                 last_error = e
                 continue
             await self.page.wait_for_timeout(250)
 
-            # ponytail: Enter doesn't always submit right after a drag-drop
-            # attach — the composer's internal "attachment ready" state can
-            # lag the visible DOM when the file arrived via synthetic events
-            # instead of a real user drop. If the text is still sitting
-            # there unsent, fall back to clicking the actual send button.
+            # Enter doesn't always submit — either a drag-drop attach left
+            # the composer's "attachment ready" state lagging the visible
+            # DOM, or the fill() itself silently didn't register (see
+            # _fill_prompt). If the text is still sitting there unsent,
+            # fall back to clicking the actual send button; if that's not
+            # even available, re-fill and retry once more.
             still_there = (await prompt.inner_text()).strip() == message.strip()
             if still_there:
                 send_button = self.page.locator('[data-testid="send-button"], button[aria-label*="send" i]').first
                 if await send_button.count() and await send_button.is_visible():
                     await send_button.click()
                     await self.page.wait_for_timeout(250)
+                else:
+                    await self._fill_prompt(prompt, message)
+                    await prompt.press("Enter", timeout=5000)
+                    await self.page.wait_for_timeout(250)
 
             return await _dismiss_rate_limit_if_present(self.page, "debug_rate_limit_send.png")
-        raise Exception(f"Failed to fill the ChatGPT prompt input after 3 attempts (input kept going stale): {last_error}")
+
+        shot_path = _debug_path("debug_send_prompt_failed.png")
+        try:
+            await self.page.screenshot(path=shot_path)
+        except Exception:
+            pass
+        raise Exception(f"Failed to fill the ChatGPT prompt input after 3 attempts (input kept going stale): {last_error}. Screenshot: {shot_path}")
 
     async def stream_message(self, message: str, raw_output: bool = False, timeout_ms: int = 480000):
         elements_before = await self.page.query_selector_all('div[data-message-author-role="assistant"]')
