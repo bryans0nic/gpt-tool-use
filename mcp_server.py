@@ -23,7 +23,20 @@ try:
 except ImportError:
     repair_json = None
 
-mcp = FastMCP("gpt-tools")
+mcp = FastMCP(
+    "gpt-tools",
+    instructions=(
+        "Before calling gpt_search to start a NEW chat, check whether this topic already has a "
+        "relevant ChatGPT project or conversation — continuing one preserves context the user has "
+        "already built up there, and starting fresh silently discards it. Prefer this order: "
+        "(1) if the current project/repo/topic maps to an existing ChatGPT project, call gpt_search "
+        "with project=<name> (use gpt_list_projects first if you don't already know the exact name); "
+        "(2) otherwise, if this looks like a continuation of a specific prior conversation, use "
+        "gpt_search_conversations to find it and pass conversation_url; (3) only omit both and start "
+        "a new chat when the topic is genuinely unrelated to anything already in ChatGPT. When in "
+        "doubt and the user hasn't specified, prefer resuming over starting fresh."
+    ),
+)
 
 _browser: ChatGPTBrowser | None = None
 _browser_lock: asyncio.Lock | None = None
@@ -527,6 +540,13 @@ async def gpt_search(
     """Search the web or research a topic using ChatGPT.
 
     Provide either `query` or `prompt_file`. The prompt is sent directly to ChatGPT.
+
+    Before defaulting to a new chat: if this topic plausibly belongs to an existing ChatGPT
+    project or a prior conversation, prefer resuming it via `project` or `conversation_url`
+    over starting fresh — a new chat silently discards context already built up there. Use
+    `gpt_list_projects`/`gpt_search_conversations` first if you're not sure what already exists.
+    Only skip straight to a new chat when the topic is genuinely unrelated to anything in ChatGPT,
+    or the user has clearly asked for a fresh conversation.
 
     Args:
         query: Full prompt to send to ChatGPT.

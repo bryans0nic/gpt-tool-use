@@ -232,6 +232,8 @@ Three tools read your ChatGPT account without opening a browser tab at all — e
 
 Typical flow: `gpt_search_conversations("topic")` to find the right chat → `gpt_read_conversation(id)` to catch up on it → `gpt_search(query=..., conversation_url=id)` to continue it.
 
+**The server nudges Claude toward this by default, without the user having to ask each time.** `mcp_server.py` sets FastMCP's `instructions=` (server-level guidance the MCP client surfaces to the model on connect) and `gpt_search`'s own docstring both say the same thing: check whether a topic already has a relevant project/conversation before defaulting to a new chat, since starting fresh silently discards context already built up in ChatGPT. This is a nudge, not an enforced rule — it can't stop an agent from starting a new chat, it just makes "check first" the path of least resistance. An already-running MCP client won't pick this up until its connection to this server restarts (new session, or a manual reconnect) — editable-install source changes don't affect a process already running.
+
 Example:
 
 ```json
