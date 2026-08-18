@@ -619,13 +619,45 @@ class ChatGPTSession:
                 continue
             await self.page.wait_for_timeout(250)
 
+            current = (await prompt.inner_text()).strip()
+            target = message.strip()
+
+            if current and current != target:
+                # Clobbered by unrelated content — confirmed live: a stale
+                # "remembered draft" from an unrelated session/tab can race
+                # ChatGPT's own cross-tab draft-restore and silently replace
+                # a just-verified-correct fill before Enter submits it. This
+                # is neither "sent" (content differs from what we sent) nor
+                # "still pending our message" (differs from that too) — it's
+                # corruption, and clicking send here would submit someone
+                # else's text. Clear it and retry from scratch rather than
+                # folding this into the generic "still there" path below,
+                # which would misread it as already sent.
+                shot_path = _debug_path("debug_send_clobbered.png")
+                try:
+                    await self.page.screenshot(path=shot_path)
+                except Exception:
+                    pass
+                last_error = Exception(
+                    f"Composer content was overwritten by unrelated text before it could send "
+                    f"(got {current[:80]!r}, expected our message) — likely a cross-tab draft-restore "
+                    f"race. Screenshot: {shot_path}"
+                )
+                try:
+                    await prompt.click()
+                    await self.page.keyboard.press("Control+A")
+                    await self.page.keyboard.press("Delete")
+                except Exception:
+                    pass
+                continue
+
             # Enter doesn't always submit — either a drag-drop attach left
             # the composer's "attachment ready" state lagging the visible
             # DOM, or the fill() itself silently didn't register (see
             # _fill_prompt). If the text is still sitting there unsent,
             # fall back to clicking the actual send button; if that's not
             # even available, re-fill and retry once more.
-            still_there = (await prompt.inner_text()).strip() == message.strip()
+            still_there = current == target
             if still_there:
                 send_button = self.page.locator('[data-testid="send-button"], button[aria-label*="send" i]').first
                 # ponytail: attachments (especially multiple) keep the send
