@@ -574,23 +574,33 @@ class ChatGPTSession:
         raise Exception(f"Timed out waiting for file upload to finish. Screenshot: {shot_path}")
 
     async def _fill_prompt(self, prompt, message: str):
-        """Fill the contenteditable prompt, using an execCommand fallback
-        when fill() sets the DOM but doesn't fire React's synthetic input
-        events — observed intermittently in CDP-attach mode against a real
-        Chrome browser, and the actual root cause behind "Enter does
-        nothing": React's internal state stays empty even though the box
-        visually shows the text, so there's nothing (from React's view) to
-        submit.
+        """Fill the contenteditable prompt via keyboard.insert_text — a
+        single atomic CDP Input.insertText call — rather than
+        Locator.fill().
+
+        fill() proved unreliable for large payloads: a detailed bug report
+        traced "Failed to fill ... after 3 attempts: Locator.fill: Timeout
+        5000ms exceeded" to prompts in the ~8-12k char range, correlated
+        with attach_files/high effort. ChatGPT's prompt box is a ProseMirror
+        contenteditable, not a plain textarea — fill()'s internal
+        actionability/select-all handling can lose the locator mid-fill as
+        the editor re-renders on a large payload. insert_text is one CDP
+        call with no per-character events and no intermediate window to go
+        stale in, and it fires real input events ProseMirror/React reliably
+        pick up — so it also sidesteps the separate issue (below) where
+        fill() silently didn't sync to React's state at all.
         """
-        await prompt.fill(message, timeout=5000)
-        await self.page.wait_for_timeout(100)
+        await prompt.click()
+        await self.page.keyboard.press("Control+A")
+        await self.page.keyboard.press("Delete")
+        await self.page.keyboard.insert_text(message)
+        await self.page.wait_for_timeout(150)
 
         if (await prompt.inner_text()).strip() == message.strip():
-            return  # fill() triggered React state correctly
+            return  # insert_text registered correctly
 
-        # fill() set the DOM content but React's internal state is still
-        # empty. execCommand('insertText') fires an InputEvent with
-        # inputType='insertText' that React's synthetic event system handles.
+        # Extremely unlikely given insert_text's directness, but keep a
+        # last-resort fallback rather than a bare failure.
         await prompt.evaluate(
             "(el, text) => { el.focus(); document.execCommand('selectAll', false, null); document.execCommand('insertText', false, text); }",
             message,
