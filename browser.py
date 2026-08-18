@@ -436,6 +436,14 @@ class ChatGPTSession:
                 pass
             raise Exception(f"Effort slider landed on {actual!r}, expected {target!r} ({level}). Screenshot: {shot_path}")
 
+    # Past this, base64-encoding + round-tripping the whole file through a
+    # page.evaluate() JSON argument gets slow and memory-heavy, and ChatGPT
+    # itself enforces its own (lower, plan-dependent) upload limits anyway.
+    # ponytail: not measured precisely — a conservative guard against an
+    # obviously-wrong call (e.g. a build output or video dropped in by
+    # mistake) rather than a tuned ceiling.
+    MAX_ATTACH_BYTES = 100 * 1024 * 1024
+
     async def attach_file(self, file_path: str, timeout_ms: int = 60000):
         """Attach a file to the prompt by simulating a drag-and-drop onto the
         composer, and wait for the upload to finish before returning.
@@ -450,8 +458,21 @@ class ChatGPTSession:
         """
         import base64
 
-        data = base64.b64encode(Path(file_path).read_bytes()).decode()
-        filename = os.path.basename(file_path)
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"attach_file: no such file: {file_path}")
+        size = path.stat().st_size
+        if size == 0:
+            raise ValueError(f"attach_file: file is empty: {file_path}")
+        if size > self.MAX_ATTACH_BYTES:
+            raise ValueError(
+                f"attach_file: {file_path} is {size / 1024 / 1024:.1f}MB, over the "
+                f"{self.MAX_ATTACH_BYTES / 1024 / 1024:.0f}MB guard. If this is genuinely "
+                f"intentional, raise MAX_ATTACH_BYTES."
+            )
+
+        data = base64.b64encode(path.read_bytes()).decode()
+        filename = path.name
         prompt = await _find_prompt_locator(self.page, timeout_ms=30000)
 
         await prompt.evaluate(
@@ -497,21 +518,52 @@ class ChatGPTSession:
                     continue
             return count
 
+        async def _rejection_message() -> str | None:
+            # ChatGPT surfaces upload rejections (unsupported type, too
+            # large, etc.) as visible text somewhere on the page rather than
+            # a distinct element we can target reliably — same
+            # phrase-matching approach as the existing rate-limit detector,
+            # scoped to phrases specific to file-upload failure so it can't
+            # false-positive on the response text discussing uploads.
+            try:
+                body = (await self.page.locator("body").inner_text()).lower()
+            except Exception:
+                return None
+            for phrase in ("couldn't be uploaded", "couldn't upload", "upload failed", "file is too large", "unsupported file type"):
+                if phrase in body:
+                    return phrase
+            return None
+
         async def _upload_done(budget_ms: int) -> bool:
             remaining = budget_ms
             while remaining > 0:
                 if await _visible_spinner_count() == 0:
                     return True
+                rejection = await _rejection_message()
+                if rejection:
+                    raise Exception(f"ChatGPT rejected the file attachment ({rejection!r} detected on page): {file_path}")
                 await self.page.wait_for_timeout(500)
                 remaining -= 500
             return False
 
         if await _upload_done(timeout_ms):
+            # ponytail: the spinner-gone check can fire before ChatGPT's own
+            # internal "attachment ready" state has actually settled — the
+            # same class of lag behind the visible DOM that made the send
+            # button stay disabled after a fast multi-file attach. A small
+            # fixed margin here is cheaper than chasing a more precise
+            # positive-confirmation signal for a file chip that renders
+            # differently (or not at all, for small/fast uploads) depending
+            # on file size — confirmed live that no chip/spinner appears at
+            # all for small files, which only reinforces there's no single
+            # reliable "attached" element to poll for instead.
+            await self.page.wait_for_timeout(400)
             return
 
         # Stuck — try dismissing whatever's blocking (e.g. the drop-zone
         # overlay staying up) and give it a shorter second window.
         if await _attempt_recovery(self.page) and await _upload_done(15000):
+            await self.page.wait_for_timeout(400)
             return
 
         shot_path = _debug_path("debug_attach_timeout.png")
