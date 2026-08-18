@@ -478,11 +478,29 @@ class ChatGPTSession:
         )
 
         # Wait for the file chip's upload-in-progress spinner to clear.
+        #
+        # ponytail: count() alone is wrong here — the page has an unrelated
+        # HIDDEN element that permanently matches "animate-spin" (confirmed
+        # live: an invisible <svg> icon elsewhere in the composer). Counting
+        # it meant every single attach burned its full budget regardless of
+        # how fast the real upload finished, which surfaced as a phantom
+        # timeout even when the send+response had already succeeded
+        # underneath. Only count visible matches.
+        async def _visible_spinner_count() -> int:
+            loc = self.page.locator('[class*="animate-spin"], [aria-label*="uploading" i]')
+            count = 0
+            for i in range(await loc.count()):
+                try:
+                    if await loc.nth(i).is_visible():
+                        count += 1
+                except Exception:
+                    continue
+            return count
+
         async def _upload_done(budget_ms: int) -> bool:
             remaining = budget_ms
             while remaining > 0:
-                uploading = await self.page.locator('[class*="animate-spin"], [aria-label*="uploading" i]').count()
-                if not uploading:
+                if await _visible_spinner_count() == 0:
                     return True
                 await self.page.wait_for_timeout(500)
                 remaining -= 500
@@ -548,7 +566,22 @@ class ChatGPTSession:
             still_there = (await prompt.inner_text()).strip() == message.strip()
             if still_there:
                 send_button = self.page.locator('[data-testid="send-button"], button[aria-label*="send" i]').first
+                # ponytail: attachments (especially multiple) keep the send
+                # button `disabled` until ChatGPT finishes processing them
+                # server-side — a real, legitimate state, not a bug. Poll
+                # for enabled rather than clicking immediately: an
+                # immediate click still waits (Playwright's actionability
+                # wait for "enabled") but silently, for its own 30s default,
+                # then fails — the actual root cause behind multi-file
+                # attach_files timing out with no send ever landing.
+                button_ready = False
                 if await send_button.count() and await send_button.is_visible():
+                    for _ in range(40):  # up to ~20s
+                        if not await send_button.is_disabled():
+                            button_ready = True
+                            break
+                        await self.page.wait_for_timeout(500)
+                if button_ready:
                     await send_button.click()
                     await self.page.wait_for_timeout(250)
                 else:
