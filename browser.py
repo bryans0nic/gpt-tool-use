@@ -598,6 +598,13 @@ class ChatGPTSession:
             pass
         raise Exception(f"Failed to fill the ChatGPT prompt input after 3 attempts (input kept going stale): {last_error}. Screenshot: {shot_path}")
 
+    async def _is_generating(self) -> bool:
+        stop_btn = await self.page.query_selector('[data-testid="stop-button"]')
+        aria_stop = await self.page.query_selector('[aria-label="Stop generating"]')
+        stop_visible = await stop_btn.is_visible() if stop_btn else False
+        aria_visible = await aria_stop.is_visible() if aria_stop else False
+        return stop_visible or aria_visible
+
     async def stream_message(self, message: str, raw_output: bool = False, timeout_ms: int = 480000):
         elements_before = await self.page.query_selector_all('div[data-message-author-role="assistant"]')
         count_before = len(elements_before)
@@ -605,6 +612,15 @@ class ChatGPTSession:
         rate_limit_message = await self._send_prompt(message)
 
         async def _wait_for_message() -> bool:
+            # ponytail: a hard 30s ceiling here is wrong — confirmed live
+            # that the stop button appears within ~3s of sending, well
+            # before any assistant DOM node exists, and stays visible
+            # through the entire "thinking" phase (which can run well past
+            # 30s on high-effort/Pro). Treating that as "stuck" triggered an
+            # unnecessary resend — a real duplicate-message risk. Keep
+            # waiting as long as the stop button says ChatGPT is actively
+            # working; only the truly-quiet case (no message, no stop
+            # button) counts against the 30s budget.
             waited = 0
             while waited < 30000:
                 nonlocal rate_limit_message
@@ -612,8 +628,9 @@ class ChatGPTSession:
                 current_count = len(await self.page.query_selector_all('div[data-message-author-role="assistant"]'))
                 if current_count > count_before:
                     return True
+                if not await self._is_generating():
+                    waited += 500
                 await self.page.wait_for_timeout(500)
-                waited += 500
             return False
 
         if not await _wait_for_message():
@@ -669,13 +686,7 @@ class ChatGPTSession:
                 class_attr = await elements[-1].get_attribute("class")
                 is_streaming = "result-streaming" in (class_attr or "")
 
-                stop_btn = await self.page.query_selector('[data-testid="stop-button"]')
-                aria_stop = await self.page.query_selector('[aria-label="Stop generating"]')
-
-                stop_visible = await stop_btn.is_visible() if stop_btn else False
-                aria_visible = await aria_stop.is_visible() if aria_stop else False
-
-                if not is_streaming and not stop_visible and not aria_visible:
+                if not is_streaming and not await self._is_generating():
                     break
                 else:
                     stable_count = 3
